@@ -192,12 +192,7 @@ class HealthFacility(core_models.VersionedModel):
     offline = models.BooleanField(db_column='OffLine')
     # row_id = models.BinaryField(db_column='RowID', blank=True, null=True)
     audit_user_id = models.IntegerField(db_column='AuditUserID')
-    program = models.ForeignKey(
-        program_models.Program, 
-        models.DO_NOTHING, 
-        db_column='program',
-        related_name="hf_program", 
-        null=True)
+    program = models.ManyToManyField(program_models.Program)
 
     def __str__(self):
         return self.code + " " + self.name
