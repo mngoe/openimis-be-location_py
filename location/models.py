@@ -4,6 +4,7 @@ import uuid
 from core import fields, filter_validity
 from django.conf import settings
 from django.db import models
+from program import models as program_models
 from core import models as core_models
 from graphql import ResolveInfo
 from .apps import LocationConfig
@@ -191,6 +192,12 @@ class HealthFacility(core_models.VersionedModel):
     offline = models.BooleanField(db_column='OffLine')
     # row_id = models.BinaryField(db_column='RowID', blank=True, null=True)
     audit_user_id = models.IntegerField(db_column='AuditUserID')
+    program = models.ForeignKey(
+        program_models.Program, 
+        models.DO_NOTHING, 
+        db_column='program',
+        related_name="hf_program", 
+        null=True)
 
     def __str__(self):
         return self.code + " " + self.name
@@ -214,7 +221,7 @@ class HealthFacility(core_models.VersionedModel):
         return queryset
 
     class Meta:
-        managed = False
+        managed = True
         db_table = 'tblHF'
 
     LEVEL_HEALTH_CENTER = 'C'
