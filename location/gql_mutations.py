@@ -7,7 +7,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError, PermissionDenied
 from django.utils.translation import gettext as _
 from graphene import InputObjectType
-
+from program import models as program_models
 from .services import LocationService, HealthFacilityService
 
 
@@ -239,6 +239,7 @@ class HealthFacilityInputType(OpenIMISMutation.Input):
     items_pricelist_id = graphene.Int(required=False)
     offline = graphene.Boolean(required=False)
     catchments = graphene.List(HealthFacilityCatchmentInputType, required=False)
+    program = graphene.List(graphene.Int)
 
 
 def update_or_create_health_facility(data, user):
@@ -246,7 +247,15 @@ def update_or_create_health_facility(data, user):
         data.pop('client_mutation_id')
     if "client_mutation_label" in data:
         data.pop('client_mutation_label')
-    return HealthFacilityService(user).update_or_create(data)
+    programs = []
+    if 'program' in data:
+        programs = program_models.Program.objects.filter(idProgram__in=data["program"])
+        data.pop('program')
+    value_return = HealthFacilityService(user).update_or_create(data)
+    if programs:
+        value_return.program.set(programs)
+        value_return.save()
+    return value_return
 
 
 class CreateHealthFacilityMutation(OpenIMISMutation):
