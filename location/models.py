@@ -214,6 +214,8 @@ class HealthFacility(core_models.VersionedModel, core_models.ExtendableModel):
     offline = models.BooleanField(db_column='OffLine', default=False)
     # row_id = models.BinaryField(db_column='RowID', blank=True, null=True)
     audit_user_id = models.IntegerField(db_column='AuditUserID')
+    responsible = models.CharField(
+        db_column='HFResponsible', max_length=255, blank=True, null=True)
 
     def __str__(self):
         return self.code + " " + self.name
