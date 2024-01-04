@@ -240,6 +240,7 @@ class HealthFacilityInputType(OpenIMISMutation.Input):
     offline = graphene.Boolean(required=False)
     catchments = graphene.List(HealthFacilityCatchmentInputType, required=False)
     program = graphene.List(graphene.Int)
+    bank_name = graphene.String(required=False)
 
 
 def update_or_create_health_facility(data, user):
