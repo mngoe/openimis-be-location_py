@@ -9,12 +9,14 @@ from core import models as core_models
 from graphql import ResolveInfo
 from .apps import LocationConfig
 import logging
+from django.db.models.expressions import RawSQL
+from django.db.models import Q
 
 logger = logging.getLogger(__file__)
 
 
 class LocationManager(models.Manager):
-    def parents(self, location_id):
+    def parents(self, location_id, loc_type=None):
         parents = Location.objects.raw(
             """
             WITH CTE_PARENTS AS (
@@ -40,9 +42,44 @@ class LocationManager(models.Manager):
         """,
             (location_id,),
         )
-        return self.filter(id__in=[x.id for x in parents])
+        return self.get_location_from_ids((parents), loc_type) if loc_type else parents
 
-    def children(self, location_id):
+    def allowed(self, user_id, loc_types=['R', 'D', 'W', 'V'], strict=True, qs = False):
+        query = f"""
+            WITH {"" if settings.MSSQL else "RECURSIVE"} USER_LOC AS (SELECT l."LocationId", l."ParentLocationId" FROM "tblUsersDistricts" ud JOIN "tblLocations" l ON ud."LocationId" = l."LocationId"  WHERE ud."ValidityTo"  is Null AND "UserID" = %s ),
+             CTE_PARENTS AS (
+            SELECT
+                parent."LocationId",
+                parent."LocationType",
+                parent."ParentLocationId"
+            FROM
+                "tblLocations" parent
+            WHERE "LocationId" in (SELECT "LocationId" FROM USER_LOC) 
+            OR (  parent."LocationId" in  (SELECT "ParentLocationId" FROM USER_LOC) 
+                    {'AND (SELECT COUNT(*) FROM USER_LOC  ul WHERE ul."ParentLocationId" = parent."LocationId" ) =  (SELECT COUNT(*) FROM "tblLocations" l WHERE l."ParentLocationId" = parent."LocationId" AND l."ValidityTo" is Null  )' if strict else ""})
+            UNION ALL
+            SELECT
+                child."LocationId",
+                child."LocationType",
+                child."ParentLocationId"
+            FROM
+                "tblLocations"  child
+                INNER JOIN CTE_PARENTS leaf
+                    ON child."ParentLocationId" = leaf."LocationId"
+            )
+            SELECT DISTINCT "LocationId" FROM CTE_PARENTS WHERE "LocationType" in ('{"','".join(loc_types)}')
+        """
+
+        if qs:
+            #location_allowed = Location.objects.filter( id__in =[obj.id for obj in Location.objects.raw( query,(user_id,))])
+            location_allowed = Location.objects.filter( id__in =RawSQL( query,(user_id,)))
+
+        else:
+            location_allowed = Location.objects.raw( query,(user_id,))
+
+        return location_allowed
+
+    def children(self, location_id, loc_type=None):
         children = Location.objects.raw(
             """
             WITH CTE_CHILDREN AS (
@@ -53,14 +90,14 @@ class LocationManager(models.Manager):
                 0 as Level
             FROM
                 tblLocations
-            WHERE ParentLocationId = %s
+            WHERE LocationId = %s
             UNION ALL
 
             SELECT
                 child.LocationId,
                 child.LocationType,
                 child.ParentLocationId,
-                parent.Level + 1
+                parent.Level + 1 as "Level"
             FROM
                 tblLocations child
                 INNER JOIN CTE_CHILDREN parent
@@ -70,7 +107,36 @@ class LocationManager(models.Manager):
         """,
             (location_id,),
         )
-        return self.filter(id__in=[x.id for x in children])
+        return self.get_location_from_ids((children), loc_type) if loc_type else children
+    
+
+    def build_user_location_filter_query(self, user: core_models.InteractiveUser, prefix='location', queryset=None, loc_types=['R', 'D', 'W', 'V']):
+        q_allowed_location = None
+        if not isinstance(user, core_models.InteractiveUser):
+            logger.warning(f"Access without filter for user {user.id} ")
+            if queryset:
+                return queryset
+            else:
+                return Q()
+        elif not user.is_imis_admin:
+            q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
+
+            if queryset:
+                return queryset.filter(q_allowed_location)
+            else:
+                return q_allowed_location
+        else:
+            if queryset:
+                return queryset
+            else:
+                return Q()
+
+
+
+    def get_location_from_ids(self, qsr, loc_type):
+        if loc_type:
+            return [x for x in list(qsr) if x.type == loc_type]
+        return list(qsr)
 
 
 class Location(core_models.VersionedModel):
@@ -113,17 +179,22 @@ class Location(core_models.VersionedModel):
 
         # OMT-280: if you create a new region and your user has district limitations, you won't find what you
         # just created. So we'll consider that if you were allowed to create it, you are also allowed to retrieve it.
-        if settings.ROW_SECURITY and not user.has_perms(LocationConfig.gql_mutation_create_locations_perms):
-            dists = UserDistrict.get_user_districts(user._u)
-            regs = set([d.location.parent.id for d in dists])
-            dists = set([d.location.id for d in dists])
-            filters = []
-            prev = "id"
-            for i, tpe in enumerate(LocationConfig.location_types):
-                loc_ids = dists if i else regs
-                filters += [models.Q(type__exact=tpe) & models.Q(**{"%s__in" % prev: loc_ids})]
-                prev = "parent__" + prev if i > 1 else "parent_" + prev if i else prev
-            return queryset.filter(reduce((lambda x, y: x | y), filters))
+        if settings.ROW_SECURITY and not user.has_perms(LocationConfig.gql_mutation_create_locations_perms)\
+            and not user.is_superuser:
+            if user.is_officer:
+                from core.models import Officer
+                return Officer.objects \
+                    .filter(code=user.username, has_login=True, validity_to__isnull=True) \
+                    .get().officer_allowed_locations
+            elif user.is_claim_admin:
+                from claim.models import ClaimAdmin
+                return ClaimAdmin.objects \
+                    .filter(code=user.username, has_login=True, validity_to__isnull=True) \
+                    .get().officer_allowed_locations
+            elif user.is_imis_admin:
+                return Location.objects
+            else:
+                return cls.objects.allowed(user.i_user_id, qs = True)
         return queryset
 
     class Meta:
@@ -208,11 +279,8 @@ class HealthFacility(core_models.VersionedModel):
             queryset = cls.filter_queryset(queryset)
         if settings.ROW_SECURITY and user.is_anonymous:
             return queryset.filter(id=-1)
-        if settings.ROW_SECURITY:
-            dist = UserDistrict.get_user_districts(user._u)
-            return queryset.filter(
-                location_id__in=[l.location_id for l in dist]
-            )
+        if settings.ROW_SECURITY and not user._u.is_imis_admin:
+            return LocationManager().build_user_location_filter_query(user._u, queryset=queryset, loc_types=['D'])
         return queryset
 
     class Meta:
@@ -273,21 +341,38 @@ class UserDistrict(core_models.VersionedModel):
         :param user: InteractiveUser to filter on
         :return: UserDistrict *objects*
         """
-        if not isinstance(user, core_models.InteractiveUser):
+        if user.is_superuser is True or (hasattr(user, "is_imis_admin") and user.is_imis_admin):
+            all_districts = Location.objects.filter(type='D', *filter_validity())
+            districts = []
+            idx = 0 
+            for d in  all_districts:
+                districts.append(
+                    UserDistrict(
+                        id=idx,
+                        user=user,
+                        location=d
+                    )
+                )
+
+            return districts
+
+        elif not isinstance(user, core_models.InteractiveUser):
             if isinstance(user, core_models.TechnicalUser):
                 logger.warning(f"get_user_districts called with a technical user `{user.username}`. "
                                "We'll return an empty list, but it should be handled before reaching here.")
             return UserDistrict.objects.none()
-        return (
-            UserDistrict.objects.select_related("location")
-            .only("location__id", "location__parent__id")
-            .select_related("location__parent")
-            .filter(user=user)
-            .filter(*filter_validity())
-            .order_by("location__parent_code")
-            .order_by("location__code")
-            .exclude(location__parent__isnull=True)
-        )
+        else:
+            return (
+                UserDistrict.objects
+                    .filter(location__type='D')
+                    .filter(*filter_validity())
+                    .filter(*filter_validity(prefix='location__'))
+                    .filter(user=user)
+                    .prefetch_related("location")
+                    .prefetch_related("location__parent")
+                    .order_by("location__parent__code")
+                    .order_by("location__code")
+            )
 
     @classmethod
     def get_user_locations(cls, user):
