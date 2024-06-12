@@ -264,6 +264,8 @@ class HealthFacility(core_models.VersionedModel):
     # row_id = models.BinaryField(db_column='RowID', blank=True, null=True)
     audit_user_id = models.IntegerField(db_column='AuditUserID')
     program = models.ManyToManyField(program_models.Program)
+    bank_name = models.CharField(
+        db_column='BankName', max_length=255, blank=True, null=True)
 
     def __str__(self):
         return self.code + " " + self.name
