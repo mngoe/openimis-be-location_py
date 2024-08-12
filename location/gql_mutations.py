@@ -7,7 +7,10 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError, PermissionDenied
 from django.utils.translation import gettext as _
 from graphene import InputObjectType
+from django.core.cache import cache
 from program import models as program_models
+import copy
+
 from .services import LocationService, HealthFacilityService
 
 
@@ -73,6 +76,9 @@ class CreateLocationMutation(CreateOrUpdateLocationMutation):
 
     @classmethod
     def async_mutate(cls, user, **data):
+
+        if Location.objects.filter(code=data['code'], type=data['type'], validity_to=None).exists():
+            raise ValidationError("Location with this code already exists.")
         try:
             return cls.do_mutate(LocationConfig.gql_mutation_create_locations_perms, user, **data)
         except Exception as exc:
@@ -91,7 +97,11 @@ class UpdateLocationMutation(CreateOrUpdateLocationMutation):
     @classmethod
     def async_mutate(cls, user, **data):
         try:
-            return cls.do_mutate(LocationConfig.gql_mutation_edit_locations_perms, user, **data)
+            return cls.do_mutate(
+                LocationConfig.gql_mutation_edit_locations_perms,
+                user,
+                **data
+            )
         except Exception as exc:
             return [{
                 'message': _("location.mutation.failed_to_update_location") % {'code': data['code']},
@@ -102,9 +112,10 @@ def tree_delete(parents, now):
     if parents:
         children = Location.objects \
             .filter(parent__in=parents) \
-            .filter(*filter_validity())
+            # .filter(*filter_validity())
+        org_children = copy.copy(children)
         children.update(validity_to=now)
-        tree_delete(children.all(), now)
+        tree_delete(org_children, now)
 
 
 class DeleteLocationMutation(OpenIMISMutation):
@@ -146,6 +157,7 @@ class DeleteLocationMutation(OpenIMISMutation):
 
     @classmethod
     def __delete_user_districts(cls, location: Location, location_delete_date=None):
+        
         if location_delete_date is None:
             from core import datetime
             location_delete_date = datetime.datetime.now()
@@ -153,6 +165,8 @@ class DeleteLocationMutation(OpenIMISMutation):
         UserDistrict.objects\
             .filter(location=location, validity_to__isnull=True)\
             .update(validity_to=location_delete_date)
+        cache.delete('user_disctrict_'+user.id)
+
 
 
 def tree_reset_types(parent, location, new_level):
@@ -226,21 +240,24 @@ class HealthFacilityInputType(OpenIMISMutation.Input):
     code = HealthFacilityCodeInputType(required=True)
     name = graphene.String(required=True)
     acc_code = graphene.String(required=False)
-    legal_form_id = graphene.String(required=False)
-    level = graphene.String(required=False)
+    legal_form_id = graphene.String(required=True)
+    level = graphene.String(required=True)
     sub_level_id = graphene.String(required=False)
-    location_id = graphene.Int(required=False)
+    location_id = graphene.Int(required=True)
     address = graphene.String(required=False)
     phone = graphene.String(required=False)
     fax = graphene.String(required=False)
     email = graphene.String(required=False)
-    care_type = graphene.String(required=False)
+    care_type = graphene.String(required=True)
     services_pricelist_id = graphene.Int(required=False)
     items_pricelist_id = graphene.Int(required=False)
     offline = graphene.Boolean(required=False)
     catchments = graphene.List(HealthFacilityCatchmentInputType, required=False)
     program = graphene.List(graphene.Int)
     bank_name = graphene.String(required=False)
+    contract_start_date = graphene.Date(required=False)
+    contract_end_date = graphene.Date(required=False)
+    status = graphene.String(required=False)
 
 
 def update_or_create_health_facility(data, user):
@@ -269,6 +286,9 @@ class CreateHealthFacilityMutation(OpenIMISMutation):
     @classmethod
     def async_mutate(cls, user, **data):
         try:
+            if HealthFacilityService.check_unique_code(data.get('code')):
+                raise ValidationError(
+                    _("mutation.hf_code_duplicated"))
             if type(user) is AnonymousUser or not user.id:
                 raise ValidationError(
                     _("mutation.authentication_required"))
@@ -301,6 +321,13 @@ class UpdateHealthFacilityMutation(OpenIMISMutation):
                     _("mutation.authentication_required"))
             if not user.has_perms(LocationConfig.gql_mutation_edit_health_facilities_perms):
                 raise PermissionDenied(_("unauthorized"))
+
+            incoming_HF_code = data['code']
+            current_HF = HealthFacility.objects.get(uuid=data['uuid'])
+            if current_HF.code != incoming_HF_code:
+                if HealthFacilityService.check_unique_code(incoming_HF_code):
+                    raise ValidationError(
+                        _("mutation.hf_code_duplicated"))
 
             data['audit_user_id'] = user.id_for_audit
             from core.utils import TimeUtils
