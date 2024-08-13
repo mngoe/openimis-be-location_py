@@ -11,7 +11,7 @@ import uuid
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('location', '0011_auto_20230213_1951'),
+        ('location', '0012_auto_20230317_0927'),
     ]
 
     operations = [

@@ -10,7 +10,7 @@ import uuid
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('location', '0010_insert_create_region_location_perms'),
+        ('location', '0011_auto_20230213_1951'),
         ('medical_pricelist', '0002_itemspricelistmutation_servicespricelistmutation'),
     ]
 

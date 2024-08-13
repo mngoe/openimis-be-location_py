@@ -20,7 +20,7 @@ def add_rights(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('location', '0009_add_location_read_right'),
+        ('location', '0010_auto_20230213_1112'),
     ]
 
     operations = [
