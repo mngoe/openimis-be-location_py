@@ -47,7 +47,6 @@ class LocationManager(models.Manager):
         return self.get_location_from_ids((parents), loc_type) if loc_type else parents
 
     def allowed(self, user_id, loc_types=['R', 'D', 'W', 'V'], strict=True, qs=False):
-
         query = f"""
             WITH {"" if settings.MSSQL else "RECURSIVE"} USER_LOC AS (SELECT l."LocationId", l."ParentLocationId" FROM "tblUsersDistricts" ud JOIN "tblLocations" l ON ud."LocationId" = l."LocationId"  WHERE ud."ValidityTo"  is Null AND "UserID" = %s ),
              CTE_PARENTS AS (
@@ -73,6 +72,7 @@ class LocationManager(models.Manager):
             )
             SELECT DISTINCT "LocationId" FROM CTE_PARENTS WHERE "LocationType" in ('{"','".join(loc_types)}')
         """
+
         if qs is not None:
             # location_allowed = Location.objects.filter( id__in =[obj.id for obj in Location.objects.raw( query,(user_id,))])
             if settings.MSSQL: # MSSQL don't support WITH in subqueries
@@ -118,6 +118,35 @@ class LocationManager(models.Manager):
             (location_id,),
         )
         return self.get_location_from_ids((children), loc_type) if loc_type else children
+
+
+    def build_user_location_filter_query(self, user: core_models.InteractiveUser, prefix='location', queryset=None, loc_types=['R', 'D', 'W', 'V']):
+        q_allowed_location = None
+        if not isinstance(user, core_models.InteractiveUser):
+            logger.warning(f"Access without filter for user {user.id} ")
+            if queryset:
+                return queryset
+            else:
+                return Q()
+        elif not user.is_imis_admin:
+            q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
+
+            if queryset:
+                return queryset.filter(q_allowed_location)
+            else:
+                return q_allowed_location
+        else:
+            if queryset:
+                return queryset
+            else:
+                return Q()
+
+
+
+    def get_location_from_ids(self, qsr, loc_type):
+        if loc_type:
+            return [x for x in list(qsr) if x.type == loc_type]
+        return list(qsr)
 
 
     def build_user_location_filter_query(self, user: core_models.InteractiveUser, prefix='location', queryset=None, loc_types=['R', 'D', 'W', 'V']):
@@ -380,6 +409,7 @@ class UserDistrict(core_models.VersionedModel):
                         location=d
                     )
                 )
+
             return districts
 
         elif not isinstance(user, core_models.InteractiveUser):
