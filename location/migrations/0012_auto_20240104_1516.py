@@ -11,7 +11,7 @@ import uuid
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('location', '0012_auto_20230317_0927'),
+        ('location', '0011_auto_20230213_1951'),
     ]
 
     operations = [
@@ -21,3 +21,4 @@ class Migration(migrations.Migration):
             field=models.CharField(blank=True, db_column='BankName', max_length=255, null=True),
         ),
     ]
+
