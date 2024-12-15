@@ -7,7 +7,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('location', '0012_auto_20230317_0927'),
-        ('location', '0019_merge_20241214_1531'),
+        ('location', '0018_auto_20230925_2243'),
         ('location', '0020_migrationjsonExt_1516'),
     ]
 
