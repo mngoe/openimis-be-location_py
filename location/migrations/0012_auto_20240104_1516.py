@@ -15,10 +15,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='healthfacility',
-            name='bank_name',
-            field=models.CharField(blank=True, db_column='BankName', max_length=255, null=True),
-        ),
+        # migrations.AddField(
+        #     model_name='healthfacility',
+        #     name='bank_name',
+        #     field=models.CharField(blank=True, db_column='BankName', max_length=255, null=True),
+        # ),
     ]
 
