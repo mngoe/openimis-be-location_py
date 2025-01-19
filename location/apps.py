@@ -14,6 +14,7 @@ DEFAULT_CFG = {
     "gql_mutation_create_health_facilities_perms": ["121102"],
     "gql_mutation_edit_health_facilities_perms": ["121103"],
     "gql_mutation_delete_health_facilities_perms": ["121104"],
+    "no_location_check": False,
     "health_facility_level": [
         {
             "code": "D",
@@ -49,6 +50,7 @@ class LocationConfig(AppConfig):
 
     health_facility_level = []
     health_facility_contract_dates_mandatory = None
+    no_location_check = None
 
     def __load_config(self, cfg):
         for field in cfg:
