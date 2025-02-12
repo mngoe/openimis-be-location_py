@@ -1,11 +1,15 @@
 from functools import reduce
 import django
-from django.core.cache import cache
+from django.core.cache import caches
+from django_redis.cache import RedisCache
 import uuid
 
 from core import filter_validity
 from django.conf import settings
 from django.db import models, connection
+from django.dispatch import receiver
+from django.db.models.signals import post_save, post_delete
+
 from django.db.models.expressions import RawSQL
 from program import models as program_models
 from core import models as core_models
@@ -15,6 +19,24 @@ import logging
 from django.db.models import Q
 
 logger = logging.getLogger(__file__)
+cache = caches["location"]
+
+
+def free_cache_for_user(user_id="*"):
+    # wildcard only supported for Redis
+    if user_id == "*" and not isinstance(cache, RedisCache):
+        cache.clear()
+    else:
+        cache_name = f"user_locations_{user_id}"
+        cache.delete(cache_name)
+        cache_name = f"user_districts_{user_id}"
+        cache.delete(cache_name)
+
+
+@receiver(post_save, sender=core_models.InteractiveUser)
+@receiver(post_delete, sender=core_models.InteractiveUser)
+def free_cache_post_user_save(sender, instance, **kwargs):
+    free_cache_for_user(instance.id)
 
 
 class LocationManager(models.Manager):
@@ -22,13 +44,13 @@ class LocationManager(models.Manager):
         parents = Location.objects.raw(
             f"""
             WITH {"" if settings.MSSQL else "RECURSIVE"} CTE_PARENTS AS (
-            SELECT 
+            SELECT
                 "LocationId",
                 "LocationType",
                 "ParentLocationId"
             FROM
                 "tblLocations"
-            WHERE "LocationId" = %s
+            WHERE "LocationId" in ( %s )
             UNION ALL
 
             SELECT
@@ -42,8 +64,15 @@ class LocationManager(models.Manager):
             )
             SELECT * FROM CTE_PARENTS;
         """,
-            (location_id,),
+            (
+                (
+                    ",".join(map(str, location_id))
+                    if isinstance(location_id, list)
+                    else location_id
+                ),
+            ),
         )
+        print("parents", parents)
         return self.get_location_from_ids((parents), loc_type) if loc_type else parents
 
     def allowed(self, user_id, loc_types=['R', 'D', 'W', 'V'], strict=True, qs=False):
@@ -177,6 +206,36 @@ class LocationManager(models.Manager):
             return [x for x in list(qsr) if x.type == loc_type]
         return list(qsr)
 
+def cache_location_graph(location_id=None):
+    """Cache the location graph as a dictionary of edges."""
+    locations = Location.objects.filter(
+        Q(parent__isnull=False) | Q(type='R'),
+        *filter_validity(),
+    )
+    graph = {}
+    location_types = {}
+    for location in locations:
+        if not location_id or location_id == location.id:
+            cache.set(f"location_{location.id}", location, timeout=None)
+        parent_id = location.parent_id if location.parent_id else "root"
+        if parent_id not in graph:
+            graph[parent_id] = set()
+        graph[parent_id].add(location.id)
+        if location.type not in location_types:
+            location_types[location.type] = set()
+        location_types[location.type].add(location.id)
+    cache.set("location_graph", graph, timeout=None)  # Cache indefinitely
+    cache.set("location_types", location_types, timeout=None)
+
+
+def cache_location_if_not_cached():
+    print("cache_location_if_not_cached", cache.has_key("location_types"))
+    if not cache.has_key("location_types"):
+        cache_location_graph()
+
+# Function to update the cache when Location objects are modified
+def update_location_cache(sender, instance, **kwargs):
+    cache_location_graph()
 
 class Location(core_models.VersionedModel, core_models.ExtendableModel):
     objects = LocationManager()
@@ -388,6 +447,10 @@ class UserDistrict(core_models.VersionedModel):
     class Meta:
         managed = True
         db_table = 'tblUsersDistricts'
+        indexes = [
+            models.Index(fields=["user", "location"], name="idx_user_location"),
+            models.Index(fields=["user", "location", "validity_to"], name="idx_user_location_validity"),
+        ]
 
     @classmethod
     def get_user_districts(cls, user):
@@ -397,38 +460,61 @@ class UserDistrict(core_models.VersionedModel):
         :return: UserDistrict *objects*
         """
 
-        if user.is_superuser is True or (hasattr(user, "is_imis_admin") and user.is_imis_admin):
-            all_districts = Location.objects.filter(type='D', *filter_validity())
-            districts = []
-            idx = 0
-            for d in all_districts:
-                districts.append(
-                    UserDistrict(
-                        id=idx,
-                        user=user,
-                        location=d
+        if hasattr(user, "_u"):
+            user = user._u
+
+        userDistrictKey = f"user_districts_{user.id}"
+        if LocationConfig.no_location_check:
+            userDistrictKey = f"user_districts_All"
+        cachedata = cache.get(userDistrictKey)
+        print("cachedata Key", userDistrictKey)
+        districts = []
+        print("cachedata", cachedata)
+        if cachedata is None:
+            cache_location_if_not_cached()
+            cache_location_type = cache.get("location_types")
+            cachedata = []
+            print("LocationConfig.no_location_check", LocationConfig.no_location_check)
+            if LocationConfig.no_location_check:
+                for loc in cache_location_type['D']:
+                    cachedata.append([0, loc])  
+            if user.is_superuser:
+                for loc in cache_location_type['D']:
+                    cachedata.append([0, loc])
+            elif not isinstance(user, core_models.InteractiveUser):
+                if isinstance(user, core_models.TechnicalUser):
+                    logger.warning(
+                        f"get_user_districts called with a technical user `{user.username}`. "
+                        "We'll return an empty list, but it should be handled before reaching here."
                     )
+            else:
+                districts = (
+                    UserDistrict.objects.filter(
+                        user=user,
+                        location__type="D",
+                        location__parent__isnull=False,
+                        *filter_validity(),
+                        *filter_validity(prefix="location__"),
+                    )
+                    .order_by("location__parent__code")
+                    .order_by("location__code")
                 )
+            for d in districts:
+                cachedata.append([d.id, d.location_id])
 
-            return districts
+            cache.set(userDistrictKey, cachedata)
 
-        elif not isinstance(user, core_models.InteractiveUser):
-            if isinstance(user, core_models.TechnicalUser):
-                logger.warning(f"get_user_districts called with a technical user `{user.username}`. "
-                               "We'll return an empty list, but it should be handled before reaching here.")
-            return UserDistrict.objects.none()
-        else:
-            return (
-                UserDistrict.objects
-                .filter(location__type='D')
-                .filter(*filter_validity())
-                .filter(*filter_validity(prefix='location__'))
-                .filter(user=user)
-                .prefetch_related("location")
-                .prefetch_related("location__parent")
-                .order_by("location__parent__code")
-                .order_by("location__code")
-            )
+        if not districts and cachedata:
+            for d in cachedata:
+                location = cache.get(f"location_{d[1]}")
+                if not location:
+                    logger.error(f"district  {d[0]}:{d[1]} does not use a cached location")
+                else:
+                    if location.parent_id:
+                        location.parent = cache.get(f"location_{location.parent_id}")
+                    districts.append(UserDistrict(id=d[0], user=user, location=location))
+
+        return districts
 
     @classmethod
     def get_user_locations(cls, user):
