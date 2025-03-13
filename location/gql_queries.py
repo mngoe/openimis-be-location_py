@@ -37,6 +37,7 @@ class LocationGQLType(DjangoObjectType):
             "parent__parent__parent__uuid": ["exact", "in"],
             "parent__id": ["exact", "in"],  # can't import itself!
         }
+        connection_class = ExtendedConnection
 
     def resolve_client_mutation_id(self, info):
         if not info.context.user.is_authenticated:
