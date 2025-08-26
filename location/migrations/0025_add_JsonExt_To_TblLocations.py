@@ -12,9 +12,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunSQL('ALTER TABLE [tblLocations] ALTER COLUMN [JsonExt] NVARCHAR(MAX)'
-                          if settings.MSSQL else psql_code,
-                          reverse_sql='ALTER TABLE [tblLocations] ALTER COLUMN [JsonExt] TEXT'
-                          if settings.MSSQL else psql_code),
+        migrations.RunSQL('ALTER TABLE [tblLocations] ADD [JsonExt] TEXT'
+                          if settings.MSSQL else
+                          'ALTER TABLE "tblLocations" ADD "JsonExt" jsonb'),
     ]
 
