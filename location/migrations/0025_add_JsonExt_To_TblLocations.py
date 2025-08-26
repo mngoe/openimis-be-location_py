@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
     psql_code = 'select 1'
 
     dependencies = [
-        ('insuree', '0024_merge_20250208_1203'),
+        ('location', '0024_merge_20250208_1203'),
     ]
 
     operations = [
