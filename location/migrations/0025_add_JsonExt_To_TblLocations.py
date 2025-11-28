@@ -12,8 +12,8 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunSQL('ALTER TABLE [tblLocations] ADD [JsonExt] TEXT'
-                          if settings.MSSQL else
-                          'ALTER TABLE "tblLocations" ADD "JsonExt" jsonb'),
+        #migrations.RunSQL('ALTER TABLE [tblLocations] ADD [JsonExt] TEXT'
+        #                  if settings.MSSQL else
+        #                  'ALTER TABLE "tblLocations" ADD "JsonExt" jsonb'),
     ]
 
