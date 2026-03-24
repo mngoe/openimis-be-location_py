@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
     dependencies = [
         ('program', '0001_initial'),
         ('medical_pricelist', '0002_itemspricelistmutation_servicespricelistmutation'),
-        ('location', '0010_auto_20230213_1112'),
+        ('location', '0010_insert_create_region_location_perms'),
     ]
 
     operations = [
