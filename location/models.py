@@ -165,6 +165,7 @@ class LocationManager(models.Manager):
             q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
 
             if queryset:
+                print("OK.... ", queryset.filter(q_allowed_location))
                 return queryset.filter(q_allowed_location)
             else:
                 print("Juste ", q_allowed_location)
@@ -199,6 +200,7 @@ class LocationManager(models.Manager):
             q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
 
             if queryset is not None:
+                print("OK.... ", queryset.filter(q_allowed_location))
                 return queryset.filter(q_allowed_location)
             else:
                 print("Juste ", q_allowed_location)
