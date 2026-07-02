@@ -158,10 +158,13 @@ class LocationManager(models.Manager):
             else:
                 return Q()
         elif not user.is_imis_admin:
+            print(
+                "final ", queryset,
+                " avec autorisés ", self.allowed(user.id, loc_types)
+            )
             q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
 
             if queryset:
-                print("final ", q_allowed_location, " pour ", queryset.filter(q_allowed_location), " avec autorisés ", self.allowed(user.id, loc_types))
                 return queryset.filter(q_allowed_location)
             else:
                 print("Juste ", q_allowed_location)
@@ -189,7 +192,10 @@ class LocationManager(models.Manager):
             else:
                 return Q()
         elif not user.is_imis_admin:
-            print("final ", q_allowed_location, " pour ", queryset.filter(q_allowed_location), " avec autorisés ", self.allowed(user.id, loc_types))
+            print(
+                "final ", queryset,
+                " avec autorisés ", self.allowed(user.id, loc_types)
+            )
             q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
 
             if queryset is not None:
