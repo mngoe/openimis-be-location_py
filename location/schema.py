@@ -132,12 +132,15 @@ class Query(graphene.ObjectType):
 
     def resolve_user_districts(self, info, **kwargs):
         if info.context.user.is_anonymous:
-            raise NotImplementedError(
-                'Anonymous Users are not registered for districts')
+            raise PermissionDenied(_("unauthorized"))
         if not isinstance(info.context.user._u, core_models.InteractiveUser):
             raise NotImplementedError(
-                'Only Interactive Users are registered for districts')
-        return [UserDistrictGQLType(d) for d in UserDistrict.get_user_districts(info.context.user._u)]
+                "Only Interactive Users are registered for districts"
+            )
+        return [
+            UserDistrictGQLType(d)
+            for d in UserDistrict.get_user_districts(info.context.user._u)
+        ]
 
     def resolve_officer_locations(self, info, **kwargs):
         if not info.context.user.has_perms(LocationConfig.gql_query_locations_perms):
