@@ -84,7 +84,11 @@ class LocationService:
         location_uuid = data.pop('uuid') if 'uuid' in data else None
         parent_uuid = data.pop('parent_uuid') if 'parent_uuid' in data else None
         incoming_code = data.get('code')
-        current_location = Location.objects.filter(uuid=location_uuid).first()
+        # row security: update targets and parents are looked up among the readable rows
+        scoped = Location.get_queryset(Location.objects.all(), self.user)
+        current_location = scoped.filter(uuid=location_uuid).first() if location_uuid else None
+        if location_uuid and current_location is None:
+            raise PermissionDenied(_("unauthorized"))
         current_code = current_location.code if current_location else None
         if current_code != incoming_code:
             if self.check_unique_code(incoming_code):
@@ -93,7 +97,7 @@ class LocationService:
         # doesn't work because of explicit attempt to set null to uuid!
         self._check_users_locations_rights(data['type'])
         if location_uuid:
-            location = Location.objects.get(uuid=location_uuid)
+            location = current_location
             self._reset_location_before_update(location)
             [setattr(location, key, data[key]) for key in data]
         else:
@@ -104,7 +108,7 @@ class LocationService:
                 location = Location.objects.create(**data)
 
         if parent_uuid:
-            location.parent = Location.objects.get(uuid=parent_uuid)
+            location.parent = scoped.get(uuid=parent_uuid)
         location.save()
         self._ensure_user_belongs_to_district(location)
 
@@ -171,7 +175,10 @@ class HealthFacilityService:
         # doesn't work because of explicit attempt to set null to uuid!
         prev_hf_id = None
         if hf_uuid:
-            hf = HealthFacility.objects.get(uuid=hf_uuid)
+            # row security: a write cannot reach a facility its author cannot read
+            hf = HealthFacility.get_queryset(HealthFacility.objects.all(), self.user).filter(uuid=hf_uuid).first()
+            if hf is None:
+                raise PermissionDenied(_("unauthorized"))
             if hf.validity_to:
                 raise ValidationError(_("cannot_update_historical_hf"))
             prev_hf_id = hf.save_history()

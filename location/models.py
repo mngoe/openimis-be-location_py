@@ -375,6 +375,9 @@ class LocationManager(models.Manager):
 
 
 class Location(core_models.VersionedModel, core_models.ExtendableModel):
+    # OP-2029: versions carry a business meaning, a validity date picks the one valid then.
+    business_versioned = True
+
     objects = LocationManager()
 
     id = models.AutoField(db_column='LocationId', primary_key=True)
@@ -404,13 +407,14 @@ class Location(core_models.VersionedModel, core_models.ExtendableModel):
         return self.code + " " + self.name
 
     @classmethod
-    def get_queryset(cls, queryset, user):
-        queryset = cls.filter_queryset(queryset)
+    def get_queryset(cls, queryset, user=None, *, validity=None, audits=None):
+        # OP-2029: validity / audits asked explicitly win over the default (current rows)
+        queryset = cls.apply_row_filters(queryset, validity, audits, default=cls.filter_queryset)
         # GraphQL calls with an info object while Rest calls with the user itself
         if isinstance(user, ResolveInfo):
             user = user.context.user
-        if settings.ROW_SECURITY and user.is_anonymous:
-            return queryset.filter(id=-1)
+        if user is None or (settings.ROW_SECURITY and user.is_anonymous):
+            return cls.no_rows(queryset)
 
         # OMT-280: if you create a new region and your user has district limitations, you won't find what you
         # just created. So we'll consider that if you were allowed to create it, you are also allowed to retrieve it.
@@ -469,6 +473,9 @@ class HealthFacilitySubLevel(models.Model):
 
 
 class HealthFacility(core_models.VersionedModel, core_models.ExtendableModel):
+    # OP-2029: versions carry a business meaning, a validity date picks the one valid then.
+    business_versioned = True
+
     class HealthFacilityStatus(models.TextChoices):
         ACTIVE = "AC"
         INACTIVE = "IN"
@@ -524,16 +531,21 @@ class HealthFacility(core_models.VersionedModel, core_models.ExtendableModel):
         return self.code + " " + self.name
 
     @classmethod
-    def get_queryset(cls, queryset, user, **kwargs):
+    def get_queryset(cls, queryset, user=None, *, validity=None, audits=None, **kwargs):
         # GraphQL calls with an info object while Rest calls with the user itself
         if isinstance(user, ResolveInfo):
             user = user.context.user
-        if user.has_perms(LocationConfig.gql_query_health_facilities_perms) and queryset is None:
+        if user is None or (settings.ROW_SECURITY and user.is_anonymous):
+            return cls.no_rows(queryset)
+        if audits is not None and not user.has_perms(LocationConfig.gql_query_health_facilities_perms):
+            # the audit trail (showHistory) is for holders of the query right only
+            audits = None
+        if user.has_perms(LocationConfig.gql_query_health_facilities_perms) and queryset is None \
+                and validity is None and audits is None:
             queryset = HealthFacility.objects
         else:
-            queryset = cls.filter_queryset(queryset)
-        if settings.ROW_SECURITY and user.is_anonymous:
-            return queryset.filter(id=-1)
+            # OP-2029: validity / audits asked explicitly win over the default (current rows)
+            queryset = cls.apply_row_filters(queryset, validity, audits, default=cls.filter_queryset)
         if settings.ROW_SECURITY and not user._u.is_imis_admin:
             return LocationManager().build_user_location_filter_query(user._u, queryset=queryset, loc_types=['D'])
         return queryset
@@ -551,7 +563,21 @@ class HealthFacility(core_models.VersionedModel, core_models.ExtendableModel):
     CARE_TYPE_BOTH = 'B'
 
 
-class HealthFacilityCatchment(models.Model):
+class HealthFacilityCatchment(core_models.RowSecurityMixin, models.Model):
+    # Visible when its health facility is (HealthFacility scopes itself in code,
+    # so ParentScope narrows through HealthFacility.get_queryset).
+    row_scope = core_models.ParentScope("health_facility")
+
+    @classmethod
+    def live_rows_q(cls):
+        from django.db.models import Q
+        return Q(validity_to__isnull=True)
+
+    @classmethod
+    def current_rows_q(cls):
+        from django.db.models import Q
+        return Q(legacy_id__isnull=True)
+
     id = models.AutoField(db_column='HFCatchmentId', primary_key=True)
     legacy_id = models.IntegerField(db_column='LegacyId', blank=True, null=True)
     health_facility = models.ForeignKey(
@@ -645,13 +671,12 @@ class UserDistrict(core_models.VersionedModel):
             .order_by("code")
 
     @classmethod
-    def get_queryset(cls, queryset, user):
+    def get_queryset(cls, queryset, user=None, *, validity=None, audits=None):
+        queryset = cls.apply_row_filters(queryset, validity, audits)
         if isinstance(user, ResolveInfo):
             user = user.context.user
-        if settings.ROW_SECURITY and user.is_anonymous:
-            return queryset.filter(id=-1)
-        if settings.ROW_SECURITY:
-            pass
+        if user is None or (settings.ROW_SECURITY and user.is_anonymous):
+            return cls.no_rows(queryset)
         return queryset
 
 
@@ -676,13 +701,12 @@ class OfficerVillage(core_models.VersionedModel):
         db_table = 'tblOfficerVillages'
 
     @classmethod
-    def get_queryset(cls, queryset, user):
+    def get_queryset(cls, queryset, user=None, *, validity=None, audits=None):
+        queryset = cls.apply_row_filters(queryset, validity, audits)
         if isinstance(user, ResolveInfo):
             user = user.context.user
-        if settings.ROW_SECURITY and user.is_anonymous:
-            return queryset.filter(id=-1)
-        if settings.ROW_SECURITY:
-            pass
+        if user is None or (settings.ROW_SECURITY and user.is_anonymous):
+            return cls.no_rows(queryset)
         return queryset
 
 

@@ -167,6 +167,10 @@ class Query(graphene.ObjectType):
         if region_uuid is not None:
             filters += [Q(location__parent__uuid=region_uuid)]
 
+        if kwargs.get('ignore_location'):
+            # deliberate: walking up to a facility outside the user's districts
+            from location.gql_queries import lift_health_facility_scope
+            lift_health_facility_scope(info)
         if (kwargs.get('ignore_location') == False or kwargs.get('ignore_location') is None):
 
           if settings.ROW_SECURITY and not info.context.user._u.is_imis_admin:
