@@ -2,6 +2,7 @@ from django.test import TestCase
 from location.test_helpers import create_test_village, create_test_location
 
 from location.models import LocationManager
+from core.test_helpers import create_enrolment_officer_role, create_medical_officer_role, create_claim_admin_role
 from core.services import create_or_update_interactive_user, create_or_update_core_user, create_or_update_user_districts
 
 
@@ -14,7 +15,6 @@ _TEST_DATA_USER = {
     "other_names": _TEST_USER_NAME,
     "user_types": "INTERACTIVE",
     "language": "en",
-    "roles": [1, 5, 9],
 }
 # Create your tests here.
 class LocationTest(TestCase):
@@ -25,7 +25,12 @@ class LocationTest(TestCase):
     def setUpTestData(cls):
         cls.test_village = create_test_village()
         cls.test_user, i_user_created = create_or_update_interactive_user(
-            user_id=None, data=_TEST_DATA_USER, audit_user_id=999, connected=False
+            user_id=None, audit_user_id=999, connected=False,
+            data={**_TEST_DATA_USER, "roles": [
+                create_enrolment_officer_role().id,
+                create_medical_officer_role().id,
+                create_claim_admin_role().id,
+            ]},
         )
         create_or_update_core_user(
             user_uuid=None, username='loctest', i_user=cls.test_user)

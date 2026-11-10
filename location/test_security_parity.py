@@ -36,6 +36,7 @@ HF_QUERY = perm_ids(LocationConfig.gql_query_health_facilities_perms)
 LOC_CREATE = perm_ids(LocationConfig.gql_mutation_create_locations_perms)
 LOC_EDIT = perm_ids(LocationConfig.gql_mutation_edit_locations_perms)
 LOC_DELETE = perm_ids(LocationConfig.gql_mutation_delete_locations_perms)
+LOC_MOVE = perm_ids(LocationConfig.gql_mutation_move_location_perms)
 HF_EDIT = perm_ids(LocationConfig.gql_mutation_edit_health_facilities_perms)
 HF_DELETE = perm_ids(LocationConfig.gql_mutation_delete_health_facilities_perms)
 
@@ -139,7 +140,7 @@ class LocationWriteTargetScopeTest(TestCase):
     def setUpTestData(cls):
         cls.tree = create_security_tree("SPW")
         cls.user = create_right_only_user(
-            "spl_writer", LOC_QUERY + HF_QUERY + LOC_CREATE + LOC_EDIT + LOC_DELETE
+            "spl_writer", LOC_QUERY + HF_QUERY + LOC_CREATE + LOC_EDIT + LOC_DELETE + LOC_MOVE
             + HF_EDIT + HF_DELETE, [cls.tree.d1.id])
         cls.admin = create_test_interactive_user(username="spl_wadmin")
 
@@ -195,6 +196,64 @@ class LocationWriteTargetScopeTest(TestCase):
             self.user, uuid=str(self.tree.v2.uuid), code=self.tree.v2.code)
         self.assertIsNone(Location.objects.get(id=self.tree.v2.id).validity_to,
                           "village outside the user's districts was deleted")
+
+    def _own_ward_with_village(self, code):
+        """A ward of the user's district holding one village, fresh for each test."""
+        ward = Location.objects.create(code=code, name=f"{code} ward", type="W", parent=self.tree.d1,
+                                       audit_user_id=-1, validity_from="2019-01-01")
+        village = Location.objects.create(code=f"{code}V", name=f"{code} village", type="V",
+                                          parent=ward, audit_user_id=-1, validity_from="2019-01-01")
+        return ward, village
+
+    def _delete_ward(self, ward, new_parent):
+        from location.gql_mutations import DeleteLocationMutation
+        return DeleteLocationMutation.async_mutate(
+            self.user, uuid=str(ward.uuid), code=ward.code, new_parent_uuid=str(new_parent.uuid))
+
+    def test_control_deleting_with_own_new_parent_works(self):
+        """[NEW] the children of a deleted location go to the new parent the user may read."""
+        ward, village = self._own_ward_with_village("SPWA")
+        errors = self._delete_ward(ward, self.tree.w1)
+        self.assertFalse(errors, errors)
+        self.assertIsNotNone(Location.objects.get(id=ward.id).validity_to)
+        self.assertEqual(self.tree.w1.id, Location.objects.get(id=village.id).parent_id)
+
+    def test_deleting_with_a_foreign_new_parent_is_refused(self):
+        """[NEW] the children of a deleted location cannot be handed to a parent outside
+        the user's districts."""
+        ward, village = self._own_ward_with_village("SPWB")
+        errors = self._delete_ward(ward, self.tree.w2)
+        self.assertTrue(errors)
+        self.assertIsNone(Location.objects.get(id=ward.id).validity_to,
+                          "location deleted although its new parent is outside the user's districts")
+        self.assertEqual(ward.id, Location.objects.get(id=village.id).parent_id,
+                         "children moved under a parent outside the user's districts")
+
+    def _move(self, location, new_parent):
+        from location.gql_mutations import MoveLocationMutation
+        return MoveLocationMutation.async_mutate(
+            self.user, uuid=str(location.uuid), code=location.code, new_parent_uuid=str(new_parent.uuid))
+
+    def test_control_moving_within_own_district_works(self):
+        ward, village = self._own_ward_with_village("SPWC")
+        errors = self._move(village, self.tree.w1)
+        self.assertFalse(errors, errors)
+        self.assertEqual(self.tree.w1.id, Location.objects.get(id=village.id).parent_id)
+
+    def test_moving_into_a_foreign_parent_is_refused(self):
+        """[NEW] a location cannot be moved under a parent outside the user's districts."""
+        ward, village = self._own_ward_with_village("SPWD")
+        errors = self._move(village, self.tree.w2)
+        self.assertTrue(errors)
+        self.assertEqual(ward.id, Location.objects.get(id=village.id).parent_id,
+                         "location moved under a parent outside the user's districts")
+
+    def test_moving_a_foreign_location_is_refused(self):
+        """[NEW] a location outside the user's districts cannot be moved into them."""
+        errors = self._move(self.tree.v2, self.tree.w1)
+        self.assertTrue(errors)
+        self.assertEqual(self.tree.w2.id, Location.objects.get(id=self.tree.v2.id).parent_id,
+                         "location outside the user's districts was moved")
 
     def test_deleting_a_district_does_not_crash(self):
         """[NEW] DeleteLocationMutation.__delete_user_districts uses an undefined `user`

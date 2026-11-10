@@ -7,7 +7,6 @@ from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError, PermissionDenied
 from django.utils.translation import gettext as _
 from graphene import InputObjectType
-from django.core.cache import cache
 from program import models as program_models
 import copy
 
@@ -108,6 +107,25 @@ class UpdateLocationMutation(CreateOrUpdateLocationMutation):
                 'detail': str(exc)}]
 
 
+def _scoped_locations(user, uuid, new_parent_uuid=None):
+    """The location and its optional new parent, read in one query through the user's scope.
+
+    Row security: a write cannot reach a location its author cannot read. For a
+    district-restricted user the scope is a recursive CTE, so both rows are fetched
+    together rather than running it once per `.get()`.
+    """
+    wanted = [u for u in (uuid, new_parent_uuid) if u]
+    # keyed lower case: MSSQL compares uuids case-insensitively, the dict must too
+    found = {str(loc.uuid).lower(): loc for loc in
+             Location.get_queryset(Location.objects.all(), user).filter(uuid__in=wanted)}
+    missing = [u for u in wanted if str(u).lower() not in found]
+    if missing:
+        raise Location.DoesNotExist(f"Location {missing[0]} not found")
+    location = found[str(uuid).lower()]
+    new_parent = found[str(new_parent_uuid).lower()] if new_parent_uuid else None
+    return location, new_parent
+
+
 def tree_delete(parents, now):
     if parents:
         children = Location.objects \
@@ -132,13 +150,11 @@ class DeleteLocationMutation(OpenIMISMutation):
         try:
             if not user.has_perms(LocationConfig.gql_mutation_delete_locations_perms):
                 raise PermissionDenied(_("unauthorized"))
-            # row security: a write cannot reach a location its author cannot read
-            location = Location.get_queryset(Location.objects.all(), user).get(uuid=data['uuid'])
             np_uuid = data.get('new_parent_uuid', None)
+            location, new_parent = _scoped_locations(user, data['uuid'], np_uuid)
             from core import datetime
             now = datetime.datetime.now()
-            if np_uuid:
-                new_parent = Location.get_queryset(Location.objects.all(), user).get(uuid=np_uuid)
+            if new_parent:
                 Location.objects \
                     .filter(parent=location) \
                     .filter(*filter_validity()) \
@@ -163,14 +179,9 @@ class DeleteLocationMutation(OpenIMISMutation):
             from core import datetime
             location_delete_date = datetime.datetime.now()
 
-        user_districts = UserDistrict.objects\
-            .filter(location=location, validity_to__isnull=True)
-        user_ids = list(user_districts.values_list('user_id', flat=True))
-        user_districts.update(validity_to=location_delete_date)
-        # update() sends no post_save: free the district caches of the users concerned
-        # (same key as core.services.userServices.create_or_update_user_districts)
-        for user_id in set(user_ids):
-            cache.delete('q_allowed_locations_' + str(user_id))
+        UserDistrict.objects\
+            .filter(location=location, validity_to__isnull=True)\
+            .update(validity_to=location_delete_date)
 
 
 
@@ -199,12 +210,9 @@ class MoveLocationMutation(OpenIMISMutation):
         try:
             if not user.has_perms(LocationConfig.gql_mutation_move_location_perms):
                 raise PermissionDenied(_("unauthorized"))
-            scoped = Location.get_queryset(Location.objects.all(), user)
-            location = scoped.get(uuid=data['uuid'])
+            location, new_parent = _scoped_locations(user, data['uuid'], data.get('new_parent_uuid', None))
             location.save_history()
             level = LocationConfig.location_types.index(location.type)
-            np_uuid = data.get('new_parent_uuid', None)
-            new_parent = scoped.get(uuid=np_uuid) if np_uuid else None
             np_level = LocationConfig.location_types.index(new_parent.type) if new_parent else -1
             location.parent = new_parent
             if np_level < level - 1 or np_level >= level:
