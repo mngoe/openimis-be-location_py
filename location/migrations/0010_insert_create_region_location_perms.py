@@ -20,8 +20,10 @@ def add_rights(apps, schema_editor):
 
 class Migration(migrations.Migration):
     dependencies = [
-        ('location', '0010_auto_20230213_1112'),
+        ('location', '0009_alter_healthfacility_options'),
     ]
+
+    replaces = [('location', '0010_auto_20230213_1112')]
 
     operations = [
         migrations.RunPython(add_rights, migrations.RunPython.noop),

@@ -6,8 +6,10 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('location', '0009_add_location_read_right'),
+        ('location', '0008_add_enrollment_officer_gql_query_location_right'),
     ]
+
+    replaces = [('location', '0009_add_location_read_right')]
 
     operations = [
         migrations.AlterModelOptions(
