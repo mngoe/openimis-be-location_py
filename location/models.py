@@ -644,6 +644,16 @@ class HealthFacility(core_models.VersionedModel, core_models.ExtendableModel):
         return self.code + " " + self.name
 
     @classmethod
+    def apply_user_row_filters(cls, queryset, user, validity=None, audits=None):
+        """validity / audits for ``user``, without the district scope.
+
+        The audit trail (showHistory) is for holders of the query right only; a
+        caller asking for nothing gets the current rows (OP-2029)."""
+        if audits is not None and not user.has_perms(LocationConfig.gql_query_health_facilities_perms):
+            audits = None
+        return cls.apply_row_filters(queryset, validity, audits, default=cls.filter_queryset)
+
+    @classmethod
     def get_queryset(cls, queryset, user=None, *, validity=None, audits=None, **kwargs):
         # GraphQL calls with an info object while Rest calls with the user itself
         if isinstance(user, ResolveInfo):
@@ -657,8 +667,7 @@ class HealthFacility(core_models.VersionedModel, core_models.ExtendableModel):
                 and validity is None and audits is None:
             queryset = HealthFacility.objects
         else:
-            # OP-2029: validity / audits asked explicitly win over the default (current rows)
-            queryset = cls.apply_row_filters(queryset, validity, audits, default=cls.filter_queryset)
+            queryset = cls.apply_user_row_filters(queryset, user, validity=validity, audits=audits)
         if settings.ROW_SECURITY and not user._u.is_imis_admin:
             return LocationManager().build_user_location_filter_query(user._u, queryset=queryset, loc_types=['D'])
         return queryset

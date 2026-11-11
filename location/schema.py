@@ -1,10 +1,10 @@
 import graphene_django_optimizer as gql_optimizer
 
-from core.models import Officer
+from core.gql import legacy_row_filters, row_filter_arguments
+from core.models import Audits, Officer, Validity
 from core.schema import OrderedDjangoFilterConnectionField
 from core.schema import signal_mutation_module_validate
 from django.utils.translation import gettext as _
-from graphene_django.filter import DjangoFilterConnectionField
 from .gql_mutations import *
 from .gql_queries import *
 from .models import *
@@ -46,22 +46,25 @@ def _uba_scoped_location_ids(user, kwargs):
 class Query(graphene.ObjectType):
     health_facilities = OrderedDjangoFilterConnectionField(
         HealthFacilityGQLType,
-        showHistory=graphene.Boolean(),
+        **row_filter_arguments(),
         orderBy=graphene.List(of_type=graphene.String)
     )
     locations = OrderedDjangoFilterConnectionField(
         LocationGQLType,
         orderBy=graphene.List(of_type=graphene.String),
         **_uba_scope_args(),
+        **row_filter_arguments(),
     )
     locations_all = OrderedDjangoFilterConnectionField(
         LocationGQLType,
-        orderBy=graphene.List(of_type=graphene.String)
+        orderBy=graphene.List(of_type=graphene.String),
+        **row_filter_arguments(),
     )
-    locations_str = DjangoFilterConnectionField(
+    locations_str = OrderedDjangoFilterConnectionField(
         LocationGQLType,
         str=graphene.String(),
         **_uba_scope_args(),
+        **row_filter_arguments(),
     )
     user_districts = graphene.List(
         UserDistrictGQLType,
@@ -71,13 +74,14 @@ class Query(graphene.ObjectType):
                                       officer_code=graphene.String(required=True),
                                       location_type=graphene.String(required=False),
                                       description="Returns list of locations assigned to a given enrolment officer.")
-    health_facilities_str = DjangoFilterConnectionField(
+    health_facilities_str = OrderedDjangoFilterConnectionField(
         HealthFacilityGQLType,
         str=graphene.String(),
         region_uuid=graphene.String(),
         district_uuid=graphene.String(),
         districts_uuids=graphene.List(of_type=graphene.String),
-        ignore_location=graphene.Boolean()
+        ignore_location=graphene.Boolean(),
+        **row_filter_arguments(),
     )
     validate_location_code = graphene.Field(
         graphene.Boolean,
@@ -91,17 +95,23 @@ class Query(graphene.ObjectType):
     )
 
     def resolve_health_facilities(self, info, **kwargs):
-        show_history = kwargs.get('showHistory', False) and info.context.user.has_perms(
-            LocationConfig.gql_query_health_facilities_perms)
         # OMT-281 allow anyone to query, limited by the get_queryset
         # if not info.context.user.has_perms(LocationConfig.gql_query_health_facilities_perms):
         if info.context.user.is_anonymous:
             raise PermissionDenied(_("unauthorized"))
-        query = HealthFacility.get_queryset(None, info.context.user, **kwargs)
-        if not show_history:
-            query = HealthFacility.filter_queryset(query)
+        # validity / audits are applied by HealthFacility.get_queryset through the type
+        # hook (OP-2029); showHistory keeps its legacy meaning for holders of the query
+        # right: every row, deleted ones and history copies included. Without the right
+        # it is ignored, as before (the model drops the audits too).
+        show_history = kwargs.get('show_history', False) and info.context.user.has_perms(
+            LocationConfig.gql_query_health_facilities_perms)
+        legacy_row_filters(
+            info, kwargs,
+            validity=Validity.ALL if show_history else Validity.NOW,
+            audits=Audits.ALL if show_history else None)
 
-        query = LocationManager().build_user_location_filter_query(info.context.user._u, queryset = query)
+        query = LocationManager().build_user_location_filter_query(
+            info.context.user._u, queryset=HealthFacility.objects.all())
 
         return gql_optimizer.query(query.all(), info)
 
@@ -131,14 +141,19 @@ class Query(graphene.ObjectType):
     def resolve_locations_all(self, info, **kwargs):
         if info.context.user.is_anonymous:
             raise PermissionDenied(_("unauthorized"))
-        return Location.objects.filter(*filter_validity()).all()
+        # live locations unless isDeleted / showHistory say otherwise (OP-2029)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        return Location.objects.all()
 
     def resolve_locations_str(self, info, **kwargs):
         if info.context.user.is_anonymous:
             raise PermissionDenied(_("unauthorized"))
 
-        queryset = Location.get_queryset(None, info.context.user)
-        filters = [*filter_validity(**kwargs)]
+        # live locations unless isDeleted / showHistory say otherwise; validity and the
+        # district scope are applied by Location.get_queryset through the type hook (OP-2029)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        queryset = Location.objects.all()
+        filters = []
 
         str = kwargs.get('str')
         if str is not None:
@@ -152,7 +167,10 @@ class Query(graphene.ObjectType):
     def resolve_health_facilities_str(self, info, **kwargs):
         if not info.context.user.is_authenticated:
             raise PermissionDenied(_("unauthorized"))
-        filters = [*filter_validity(**kwargs)]
+        # live facilities unless isDeleted / showHistory say otherwise; validity is applied
+        # by the type hook, also when ignoreLocation lifts the district scope (OP-2029)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        filters = []
         search = kwargs.get('str')
         district_uuid = kwargs.get('district_uuid')
         district_uuids = kwargs.get('districts_uuids')

@@ -3,6 +3,7 @@ import graphene
 import base64
 from graphene_django import DjangoObjectType
 from core.gql.scoped_object_type import ScopedQuerysetMixin
+from core.gql.row_filter_args import row_filter_kwargs
 from django.core.exceptions import PermissionDenied
 from django.utils.translation import gettext as _
 from core import prefix_filterset, ExtendedConnection
@@ -12,7 +13,10 @@ from location.models import HealthFacilityLegalForm, Location, HealthFacilitySub
 from django.db.models import Field
 
 
-class LocationGQLType(DjangoObjectType):
+class LocationGQLType(ScopedQuerysetMixin, DjangoObjectType):
+    """Row security and validity of locations are Location.get_queryset; the
+    connection's isDeleted / showHistory (and the resolvers' legacy arguments)
+    reach it as validity / audits (OP-2029)."""
     client_mutation_id = graphene.String()
     Field.register_lookup(NotEqual)
 
@@ -50,9 +54,10 @@ class LocationGQLType(DjangoObjectType):
     @classmethod
     def get_queryset(cls, queryset, info):
         if info.field_name == "locationsAll":
-            return queryset
-        else:
-            return Location.get_queryset(queryset, info.context.user)
+            # locationsAll is not scoped to the user's districts: validity / audits only
+            return cls.refine_queryset(Location.apply_row_filters(
+                queryset, **row_filter_kwargs(Location, info), default=Location.filter_queryset), info)
+        return super().get_queryset(queryset, info)
 
 
 class HealthFacilityLegalFormGQLType(DjangoObjectType):
@@ -100,7 +105,9 @@ class HealthFacilityGQLType(ScopedQuerysetMixin, DjangoObjectType):
     @classmethod
     def get_queryset(cls, queryset, info):
         if _path_key(info) in (getattr(info.context, HF_SCOPE_LIFTED, None) or ()):
-            return queryset
+            # the district scope is lifted, validity / audits still apply (OP-2029)
+            return cls.refine_queryset(HealthFacility.apply_user_row_filters(
+                queryset, info.context.user, **row_filter_kwargs(HealthFacility, info)), info)
         return super().get_queryset(queryset, info)
 
     class Meta:
