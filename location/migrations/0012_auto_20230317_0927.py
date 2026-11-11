@@ -4,7 +4,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-    replaces = [('location', '0012_auto_20240104_1516')]
     dependencies = [
         ('location', '0011_auto_20230317_0924'),
     ]

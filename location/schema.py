@@ -179,8 +179,7 @@ class Query(graphene.ObjectType):
 
     def resolve_user_districts(self, info, **kwargs):
         if info.context.user.is_anonymous:
-            raise NotImplementedError(
-                'Anonymous Users are not registered for districts')
+            raise PermissionDenied(_("unauthorized"))
         if not isinstance(info.context.user._u, core_models.InteractiveUser):
             raise NotImplementedError(
                 'Only Interactive Users are registered for districts')

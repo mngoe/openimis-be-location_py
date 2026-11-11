@@ -1,20 +1,96 @@
 from functools import reduce
 import django
-from django.core.cache import cache
+from django.core.cache import caches
+from django_redis.cache import RedisCache
 import uuid
 
 from core import filter_validity
 from django.conf import settings
-from django.db import models, connection
+from django.db import models, connection, transaction
+from django.dispatch import receiver
+from django.db.models.signals import post_save, post_delete
+
 from django.db.models.expressions import RawSQL
 from program import models as program_models
 from core import models as core_models
+from core.cache_control import cache_delete, cache_delete_many, cache_get, cache_memo_forget, cache_set
 from graphql import ResolveInfo
 from .apps import LocationConfig
 import logging
 from django.db.models import Q
 
 logger = logging.getLogger(__file__)
+LOCATION_CACHE = "location"
+cache = caches[LOCATION_CACHE]
+
+
+# Reads and writes go through core.cache_control (ported from release/26.10): every
+# entry expires after CACHE_OBJECT_TTL, a failing backend degrades to a miss, and a
+# process-local cache is not trusted while mutations run in a worker.
+def _cache_get(key):
+    return cache_get(key, alias=LOCATION_CACHE)
+
+
+def _cache_set(key, value):
+    return cache_set(key, value, alias=LOCATION_CACHE)
+
+
+USER_LOCATION_CACHE_KEYS = ("user_locations_{}", "user_districts_{}")
+LOCATION_GRAPH_CACHE_KEYS = ("location_graph", "location_types")
+
+
+def free_cache_for_user(user_id="*"):
+    """Drop the cached location and district sets for one user, or for everyone.
+
+    ``user_id="*"`` means everyone, which is what a location change needs: it
+    shifts the expanded set of every user whose branch the location falls under.
+    Globbing is a django-redis extension, so the wildcard needs ``delete_pattern``
+    on Redis and a full ``clear()`` on any other backend. (The condition used to
+    be inverted: Redis got a literal ``delete("user_locations_*")``, which
+    invalidated nothing.)
+    """
+    if user_id == "*":
+        cache_memo_forget([key.format("") for key in USER_LOCATION_CACHE_KEYS], alias=LOCATION_CACHE)
+        try:
+            if isinstance(cache, RedisCache):
+                for key in USER_LOCATION_CACHE_KEYS:
+                    cache.delete_pattern(key.format("*"))
+            else:
+                cache.clear()
+        except Exception as exc:  # a cache outage must not abort the write
+            logger.warning("location cache flush failed: %s", exc)
+        return
+    cache_delete_many([key.format(user_id) for key in USER_LOCATION_CACHE_KEYS], alias=LOCATION_CACHE)
+
+
+def free_cache_for_user_now_and_on_commit(user_id="*"):
+    """``free_cache_for_user``, once now and once more when the write commits.
+
+    The signals that call this run inside the writer's transaction: a request
+    reading committed data in between would re-cache the old state.
+    """
+    free_cache_for_user(user_id)
+    transaction.on_commit(lambda: free_cache_for_user(user_id))
+
+
+def free_location_graph_cache():
+    """Drop the cached location tree; it is rebuilt lazily on the next read."""
+    cache_delete_many(LOCATION_GRAPH_CACHE_KEYS, alias=LOCATION_CACHE)
+
+
+def free_location_caches_now_and_on_commit():
+    """A location was created, changed, moved or deleted: drop the tree and every user's sets."""
+    def flush():
+        free_location_graph_cache()
+        free_cache_for_user("*")
+    flush()
+    transaction.on_commit(flush)
+
+
+@receiver(post_save, sender=core_models.InteractiveUser)
+@receiver(post_delete, sender=core_models.InteractiveUser)
+def free_cache_post_user_save(sender, instance, **kwargs):
+    free_cache_for_user_now_and_on_commit(instance.id)
 
 
 class LocationManager(models.Manager):
@@ -22,13 +98,13 @@ class LocationManager(models.Manager):
         parents = Location.objects.raw(
             f"""
             WITH {"" if settings.MSSQL else "RECURSIVE"} CTE_PARENTS AS (
-            SELECT 
+            SELECT
                 "LocationId",
                 "LocationType",
                 "ParentLocationId"
             FROM
                 "tblLocations"
-            WHERE "LocationId" = %s
+            WHERE "LocationId" in ( %s )
             UNION ALL
 
             SELECT
@@ -42,7 +118,13 @@ class LocationManager(models.Manager):
             )
             SELECT * FROM CTE_PARENTS;
         """,
-            (location_id,),
+            (
+                (
+                    ",".join(map(str, location_id))
+                    if isinstance(location_id, list)
+                    else location_id
+                ),
+            ),
         )
         return self.get_location_from_ids((parents), loc_type) if loc_type else parents
 
@@ -373,6 +455,37 @@ class LocationManager(models.Manager):
             return [x for x in list(qsr) if x.type == loc_type]
         return list(qsr)
 
+def cache_location_graph(location_id=None):
+    """Cache the location graph as a dictionary of edges."""
+    locations = Location.objects.filter(
+        Q(parent__isnull=False) | Q(type='R'),
+        *filter_validity(),
+    )
+    graph = {}
+    location_types = {}
+    for location in locations:
+        parent_id = location.parent_id if location.parent_id else "root"
+        if parent_id not in graph:
+            graph[parent_id] = set()
+        graph[parent_id].add(location.id)
+        if location.type not in location_types:
+            location_types[location.type] = set()
+        location_types[location.type].add(location.id)
+    _cache_set("location_graph", graph)
+    _cache_set("location_types", location_types)
+    return location_types
+
+
+def cache_location_if_not_cached():
+    location_types = _cache_get("location_types")
+    if location_types is None:
+        location_types = cache_location_graph()
+    return location_types
+
+
+# Function to update the cache when Location objects are modified
+def update_location_cache(sender, instance, **kwargs):
+    free_location_caches_now_and_on_commit()
 
 class Location(core_models.VersionedModel, core_models.ExtendableModel):
     # OP-2029: versions carry a business meaning, a validity date picks the one valid then.
@@ -614,6 +727,10 @@ class UserDistrict(core_models.VersionedModel):
     class Meta:
         managed = True
         db_table = 'tblUsersDistricts'
+        indexes = [
+            models.Index(fields=["user", "location"], name="idx_user_location"),
+            models.Index(fields=["user", "location", "validity_to"], name="idx_user_location_validity"),
+        ]
 
     @classmethod
     def get_user_districts(cls, user):
@@ -623,38 +740,59 @@ class UserDistrict(core_models.VersionedModel):
         :return: UserDistrict *objects*
         """
 
-        if user.is_superuser is True or (hasattr(user, "is_imis_admin") and user.is_imis_admin):
-            all_districts = Location.objects.filter(type='D', *filter_validity())
-            districts = []
-            idx = 0
-            for d in all_districts:
-                districts.append(
-                    UserDistrict(
-                        id=idx,
-                        user=user,
-                        location=d
+        if hasattr(user, "_u"):
+            user = user._u
+
+        userDistrictKey = f"user_districts_{user.id}"
+        if LocationConfig.no_location_check:
+            userDistrictKey = "user_districts_all"
+        cachedata = _cache_get(userDistrictKey)
+        districts = []
+        if cachedata is None:
+            cache_location_type = cache_location_if_not_cached()
+            cachedata = []
+            if user.is_superuser or LocationConfig.no_location_check:
+                for loc in cache_location_type.get('D', ()):
+                    cachedata.append([0, loc])
+            elif not isinstance(user, core_models.InteractiveUser):
+                if isinstance(user, core_models.TechnicalUser):
+                    logger.warning(
+                        f"get_user_districts called with a technical user `{user.username}`. "
+                        "We'll return an empty list, but it should be handled before reaching here."
                     )
+            else:
+                districts = (
+                    UserDistrict.objects.filter(
+                        user=user,
+                        location__type="D",
+                        location__parent__isnull=False,
+                        *filter_validity(),
+                        *filter_validity(prefix="location__"),
+                    )
+                    .order_by("location__parent__code")
+                    .order_by("location__code")
                 )
+            for d in districts:
+                cachedata.append([d.id, d.location_id])
 
-            return districts
+            _cache_set(userDistrictKey, cachedata)
 
-        elif not isinstance(user, core_models.InteractiveUser):
-            if isinstance(user, core_models.TechnicalUser):
-                logger.warning(f"get_user_districts called with a technical user `{user.username}`. "
-                               "We'll return an empty list, but it should be handled before reaching here.")
-            return UserDistrict.objects.none()
-        else:
-            return (
-                UserDistrict.objects
-                .filter(location__type='D')
-                .filter(*filter_validity())
-                .filter(*filter_validity(prefix='location__'))
-                .filter(user=user)
-                .prefetch_related("location")
-                .prefetch_related("location__parent")
-                .order_by("location__parent__code")
-                .order_by("location__code")
-            )
+        if not districts and cachedata:
+            # the ids come from the cache, the locations from the database: a cached
+            # Location object would outlive any rename or move
+            locations = Location.objects.in_bulk([d[1] for d in cachedata])
+            parents = Location.objects.in_bulk(
+                {loc.parent_id for loc in locations.values() if loc.parent_id})
+            for district_id, loc_id in cachedata:
+                location = locations.get(loc_id)
+                if not location:
+                    logger.warning(f"district {district_id}:{loc_id} not found")
+                    continue
+                if location.parent_id:
+                    location.parent = parents.get(location.parent_id)
+                districts.append(UserDistrict(id=district_id, user=user, location=location))
+
+        return districts
 
     @classmethod
     def get_user_locations(cls, user):
@@ -678,6 +816,18 @@ class UserDistrict(core_models.VersionedModel):
         if user is None or (settings.ROW_SECURITY and user.is_anonymous):
             return cls.no_rows(queryset)
         return queryset
+
+
+@receiver(post_save, sender=UserDistrict)
+@receiver(post_delete, sender=UserDistrict)
+def free_cache_post_user_district_save(sender, instance, **kwargs):
+    free_cache_for_user_now_and_on_commit(instance.user_id)
+
+
+@receiver(post_save, sender=Location)
+@receiver(post_delete, sender=Location)
+def location_changed(sender, instance, **kwargs):
+    update_location_cache(sender, instance, **kwargs)
 
 
 class OfficerVillage(core_models.VersionedModel):

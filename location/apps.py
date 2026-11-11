@@ -57,13 +57,13 @@ class LocationConfig(AppConfig):
     uba_picker_include_ancestors = True
 
     def __load_config(self, cfg):
+        #print("cfg", cfg)
         for field in cfg:
             if hasattr(LocationConfig, field):
                 setattr(LocationConfig, field, cfg[field])
 
     def ready(self):
         from core.models import ModuleConfiguration
-
         cfg = ModuleConfiguration.get_or_default(MODULE_NAME, DEFAULT_CFG)
         self.__load_config(cfg)
         self._register_uba_link_types()

@@ -2,7 +2,7 @@ import graphene
 from .apps import LocationConfig
 from core import assert_string_length, filter_validity
 from core.schema import OpenIMISMutation
-from .models import Location, HealthFacility, UserDistrict
+from .models import Location, HealthFacility, UserDistrict, free_cache_for_user_now_and_on_commit
 from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError, PermissionDenied
 from django.utils.translation import gettext as _
@@ -179,9 +179,12 @@ class DeleteLocationMutation(OpenIMISMutation):
             from core import datetime
             location_delete_date = datetime.datetime.now()
 
-        UserDistrict.objects\
-            .filter(location=location, validity_to__isnull=True)\
-            .update(validity_to=location_delete_date)
+        user_districts = UserDistrict.objects.filter(location=location, validity_to__isnull=True)
+        user_ids = set(user_districts.values_list('user_id', flat=True))
+        user_districts.update(validity_to=location_delete_date)
+        # update() sends no post_save: free the cached districts of the users it touched
+        for user_id in user_ids:
+            free_cache_for_user_now_and_on_commit(user_id)
 
 
 
