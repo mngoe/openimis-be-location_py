@@ -191,7 +191,7 @@ class Query(graphene.ObjectType):
             lift_health_facility_scope(info)
         if (kwargs.get('ignore_location') == False or kwargs.get('ignore_location') is None):
 
-          if settings.ROW_SECURITY and not info.context.user._u.is_imis_admin:
+          if settings.ROW_SECURITY and not is_location_unscoped(info.context.user):
               filters += [LocationManager().build_user_location_filter_query(info.context.user._u, loc_types= ['D'])]
         return HealthFacility.objects.filter(*filters)
 

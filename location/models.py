@@ -93,6 +93,31 @@ def free_cache_post_user_save(sender, instance, **kwargs):
     free_cache_for_user_now_and_on_commit(instance.id)
 
 
+def is_location_unscoped(user):
+    """
+    True when `user` is not narrowed to the locations of their districts: an IMIS admin,
+    a holder of the unscoped-location right (`gql_unscoped_location_perms`, global bag),
+    or a non-interactive (technical) user, which the location filter never narrowed.
+    Cached like `is_imis_admin` (10 minutes).
+    """
+    from location.apps import LocationConfig
+    interactive = getattr(user, "_u", user)
+    if not isinstance(interactive, core_models.InteractiveUser):
+        return True
+    if interactive.is_imis_admin:
+        return True
+    perms = [int(perm) for perm in LocationConfig.gql_unscoped_location_perms or []]
+    if not perms:
+        return False
+    key = f"location_unscoped_{interactive.id}"
+    unscoped = cache.get(key)
+    if unscoped is None:
+        rights = set(interactive.rights)
+        unscoped = all(perm in rights for perm in perms)
+        cache.set(key, unscoped, 600)
+    return unscoped
+
+
 class LocationManager(models.Manager):
     def parents(self, location_id, loc_type=None):
         parents = Location.objects.raw(
@@ -232,7 +257,7 @@ class LocationManager(models.Manager):
                 return queryset
             else:
                 return Q()
-        elif not user.is_imis_admin:
+        elif not is_location_unscoped(user):
             q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
             q_uba = self.build_uba_location_filter_query(
                 user, prefix=prefix, loc_types=loc_types, link_types=link_types)
@@ -544,7 +569,7 @@ class Location(core_models.VersionedModel, core_models.ExtendableModel):
                 allowed = ClaimAdmin.objects \
                     .filter(code=user.username, has_login=True, validity_to__isnull=True) \
                     .get().officer_allowed_locations
-            elif user.is_imis_admin:
+            elif is_location_unscoped(user):
                 return queryset
             else:
                 allowed = cls.objects.allowed(user.i_user_id, qs=True)
@@ -668,7 +693,7 @@ class HealthFacility(core_models.VersionedModel, core_models.ExtendableModel):
             queryset = HealthFacility.objects
         else:
             queryset = cls.apply_user_row_filters(queryset, user, validity=validity, audits=audits)
-        if settings.ROW_SECURITY and not user._u.is_imis_admin:
+        if settings.ROW_SECURITY and not is_location_unscoped(user):
             return LocationManager().build_user_location_filter_query(user._u, queryset=queryset, loc_types=['D'])
         return queryset
 
