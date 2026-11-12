@@ -8,7 +8,6 @@ class Migration(migrations.Migration):
     dependencies = [
         ('location', '0014_add_missing_fields_to_django_scheme'),
     ]
-
     operations = [
         migrations.AlterModelOptions(
             name='healthfacilitycatchment',

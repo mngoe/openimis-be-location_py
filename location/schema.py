@@ -1,48 +1,87 @@
 import graphene_django_optimizer as gql_optimizer
 
-from core.models import Officer
+from core.gql import legacy_row_filters, row_filter_arguments
+from core.models import Audits, Officer, Validity
 from core.schema import OrderedDjangoFilterConnectionField
 from core.schema import signal_mutation_module_validate
 from django.utils.translation import gettext as _
-from graphene_django.filter import DjangoFilterConnectionField
 from .gql_mutations import *
 from .gql_queries import *
 from .models import *
 from .services import LocationService
 
 
+def _uba_scope_args():
+    """
+    The arguments scoping a location query to the locations a UBA credential puts the
+    user on - an enrolment officer's pickers showing their villages only. Opt in: a query
+    without `uba_link_type` keeps the district scope, whatever credentials the user holds.
+    """
+    return {
+        "uba_link_type": graphene.String(
+            required=False,
+            description="Restrict to the locations the current user holds a link on under "
+                        "that credential (e.g. 'ENROLMENT'), 'ALL' for any location aware one. "
+                        "Ignored for a user holding no such link."),
+        "uba_include_ancestors": graphene.Boolean(
+            required=False,
+            description="With uba_link_type, also return the ancestors of the linked "
+                        "locations so the tree can be navigated down to them. Defaults to "
+                        "the location module setting uba_picker_include_ancestors (true)."),
+    }
+
+
+def _uba_scoped_location_ids(user, kwargs):
+    """The location ids the UBA arguments restrict to, None when they restrict nothing."""
+    link_type = kwargs.get("uba_link_type")
+    if not link_type or not isinstance(user._u, core_models.InteractiveUser):
+        return None
+    include_ancestors = kwargs.get("uba_include_ancestors")
+    if include_ancestors is None:
+        include_ancestors = LocationConfig.uba_picker_include_ancestors
+    return LocationManager().uba_location_ids(
+        user._u, link_type, include_ancestors=include_ancestors)
+
+
 class Query(graphene.ObjectType):
     health_facilities = OrderedDjangoFilterConnectionField(
         HealthFacilityGQLType,
-        showHistory=graphene.Boolean(),
+        **row_filter_arguments(),
         orderBy=graphene.List(of_type=graphene.String)
     )
     locations = OrderedDjangoFilterConnectionField(
         LocationGQLType,
         orderBy=graphene.List(of_type=graphene.String),
+        **_uba_scope_args(),
+        **row_filter_arguments(),
     )
     locations_all = OrderedDjangoFilterConnectionField(
         LocationGQLType,
-        orderBy=graphene.List(of_type=graphene.String)
+        orderBy=graphene.List(of_type=graphene.String),
+        **row_filter_arguments(),
     )
-    locations_str = DjangoFilterConnectionField(
+    locations_str = OrderedDjangoFilterConnectionField(
         LocationGQLType,
         str=graphene.String(),
+        **_uba_scope_args(),
+        **row_filter_arguments(),
     )
     user_districts = graphene.List(
-        UserDistrictGQLType
+        UserDistrictGQLType,
+        **_uba_scope_args(),
     )
     officer_locations = graphene.List(LocationGQLType,
                                       officer_code=graphene.String(required=True),
                                       location_type=graphene.String(required=False),
                                       description="Returns list of locations assigned to a given enrolment officer.")
-    health_facilities_str = DjangoFilterConnectionField(
+    health_facilities_str = OrderedDjangoFilterConnectionField(
         HealthFacilityGQLType,
         str=graphene.String(),
         region_uuid=graphene.String(),
         district_uuid=graphene.String(),
         districts_uuids=graphene.List(of_type=graphene.String),
-        ignore_location=graphene.Boolean()
+        ignore_location=graphene.Boolean(),
+        **row_filter_arguments(),
     )
     validate_location_code = graphene.Field(
         graphene.Boolean,
@@ -56,17 +95,23 @@ class Query(graphene.ObjectType):
     )
 
     def resolve_health_facilities(self, info, **kwargs):
-        show_history = kwargs.get('showHistory', False) and info.context.user.has_perms(
-            LocationConfig.gql_query_health_facilities_perms)
         # OMT-281 allow anyone to query, limited by the get_queryset
         # if not info.context.user.has_perms(LocationConfig.gql_query_health_facilities_perms):
         if info.context.user.is_anonymous:
             raise PermissionDenied(_("unauthorized"))
-        query = HealthFacility.get_queryset(None, info.context.user, **kwargs)
-        if not show_history:
-            query = HealthFacility.filter_queryset(query)
+        # validity / audits are applied by HealthFacility.get_queryset through the type
+        # hook (OP-2029); showHistory keeps its legacy meaning for holders of the query
+        # right: every row, deleted ones and history copies included. Without the right
+        # it is ignored, as before (the model drops the audits too).
+        show_history = kwargs.get('show_history', False) and info.context.user.has_perms(
+            LocationConfig.gql_query_health_facilities_perms)
+        legacy_row_filters(
+            info, kwargs,
+            validity=Validity.ALL if show_history else Validity.NOW,
+            audits=Audits.ALL if show_history else None)
 
-        query = LocationManager().build_user_location_filter_query(info.context.user._u, queryset = query)
+        query = LocationManager().build_user_location_filter_query(
+            info.context.user._u, queryset=HealthFacility.objects.all())
 
         return gql_optimizer.query(query.all(), info)
 
@@ -87,29 +132,45 @@ class Query(graphene.ObjectType):
         # if not info.context.user.has_perms(LocationConfig.gql_query_locations_perms):
         if info.context.user.is_anonymous:
             raise PermissionDenied(_("unauthorized"))
+        uba_location_ids = _uba_scoped_location_ids(info.context.user, kwargs)
+        if uba_location_ids is not None:
+            # Location.get_queryset still applies the district scope on top of it
+            return Location.objects.filter(id__in=uba_location_ids)
+        return None
 
     def resolve_locations_all(self, info, **kwargs):
         if info.context.user.is_anonymous:
             raise PermissionDenied(_("unauthorized"))
-        return Location.objects.filter(*filter_validity()).all()
+        # live locations unless isDeleted / showHistory say otherwise (OP-2029)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        return Location.objects.all()
 
     def resolve_locations_str(self, info, **kwargs):
         if info.context.user.is_anonymous:
             raise PermissionDenied(_("unauthorized"))
 
-        queryset = Location.get_queryset(None, info.context.user)
-        filters = [*filter_validity(**kwargs)]
+        # live locations unless isDeleted / showHistory say otherwise; validity and the
+        # district scope are applied by Location.get_queryset through the type hook (OP-2029)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        queryset = Location.objects.all()
+        filters = []
 
         str = kwargs.get('str')
         if str is not None:
             filters += [Q(code__icontains=str) | Q(name__icontains=str)]
+        uba_location_ids = _uba_scoped_location_ids(info.context.user, kwargs)
+        if uba_location_ids is not None:
+            filters += [Q(id__in=uba_location_ids)]
 
         return queryset.filter(*filters)
 
     def resolve_health_facilities_str(self, info, **kwargs):
         if not info.context.user.is_authenticated:
             raise PermissionDenied(_("unauthorized"))
-        filters = [*filter_validity(**kwargs)]
+        # live facilities unless isDeleted / showHistory say otherwise; validity is applied
+        # by the type hook, also when ignoreLocation lifts the district scope (OP-2029)
+        legacy_row_filters(info, kwargs, validity=Validity.NOW)
+        filters = []
         search = kwargs.get('str')
         district_uuid = kwargs.get('district_uuid')
         district_uuids = kwargs.get('districts_uuids')
@@ -124,9 +185,13 @@ class Query(graphene.ObjectType):
         if region_uuid is not None:
             filters += [Q(location__parent__uuid=region_uuid)]
 
+        if kwargs.get('ignore_location'):
+            # deliberate: walking up to a facility outside the user's districts
+            from location.gql_queries import lift_health_facility_scope
+            lift_health_facility_scope(info)
         if (kwargs.get('ignore_location') == False or kwargs.get('ignore_location') is None):
 
-          if settings.ROW_SECURITY and not info.context.user._u.is_imis_admin:
+          if settings.ROW_SECURITY and not is_location_unscoped(info.context.user):
               filters += [LocationManager().build_user_location_filter_query(info.context.user._u, loc_types= ['D'])]
         return HealthFacility.objects.filter(*filters)
 
@@ -135,12 +200,14 @@ class Query(graphene.ObjectType):
             raise PermissionDenied(_("unauthorized"))
         if not isinstance(info.context.user._u, core_models.InteractiveUser):
             raise NotImplementedError(
-                "Only Interactive Users are registered for districts"
-            )
-        return [
-            UserDistrictGQLType(d)
-            for d in UserDistrict.get_user_districts(info.context.user._u)
-        ]
+                'Only Interactive Users are registered for districts')
+        districts = UserDistrict.get_user_districts(info.context.user._u)
+        uba_location_ids = _uba_scoped_location_ids(info.context.user, kwargs)
+        if uba_location_ids is not None:
+            # the districts of a user are few: fetch the allowed ones once
+            allowed = set(uba_location_ids.filter(type='D').values_list('id', flat=True))
+            districts = [d for d in districts if d.location_id in allowed]
+        return [UserDistrictGQLType(d) for d in districts]
 
     def resolve_officer_locations(self, info, **kwargs):
         if not info.context.user.has_perms(LocationConfig.gql_query_locations_perms):

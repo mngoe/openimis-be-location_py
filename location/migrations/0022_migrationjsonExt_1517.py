@@ -3,6 +3,23 @@
 from django.db import migrations, models
 
 
+def add_location_json_ext_if_missing(apps, schema_editor):
+    """tblLocations.JsonExt is already added by 0013 (and may pre-exist in
+    legacy databases), so only create the column when it is really missing."""
+    connection = schema_editor.connection
+    with connection.cursor() as cursor:
+        columns = {
+            col.name.lower()
+            for col in connection.introspection.get_table_description(cursor, "tblLocations")
+        }
+    if "jsonext" in columns:
+        return
+    Location = apps.get_model("location", "Location")
+    field = models.JSONField(blank=True, null=True, db_column="JsonExt")
+    field.set_attributes_from_name("json_ext")
+    schema_editor.add_field(Location, field)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -10,9 +27,16 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name='location',
-            name='json_ext',
-            field=models.JSONField(blank=True, db_column='JsonExt', null=True),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddField(
+                    model_name='location',
+                    name='json_ext',
+                    field=models.JSONField(blank=True, db_column='JsonExt', null=True),
+                ),
+            ],
+            database_operations=[
+                migrations.RunPython(add_location_json_ext_if_missing, migrations.RunPython.noop),
+            ],
         ),
     ]
