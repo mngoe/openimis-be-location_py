@@ -1,11 +1,10 @@
 """
 The unscoped-location right (gql_unscoped_location_perms, 121907): its holder is not
-narrowed to the locations of their districts, like an IMIS admin (whose role gets it).
+narrowed to the locations of their districts. An IMIS admin is unscoped too, with no role grant.
 """
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 
-from core.models import Role, RoleRight
 from core.test_helpers import create_security_tree, create_right_only_user, perm_ids
 from location.apps import LocationConfig
 from location.models import Location, LocationManager, is_location_unscoped
@@ -45,7 +44,8 @@ class UnscopedLocationRightTest(TestCase):
             .values_list("id", flat=True))
         self.assertEqual({self.t.v1.id, self.t.v2.id}, ids)
 
-    def test_imis_admin_role_holds_the_right(self):
-        admin = Role.objects.filter(is_system=64, validity_to__isnull=True).first()
-        self.assertIsNotNone(admin, "no IMIS admin role in this database")
-        self.assertTrue(RoleRight.objects.filter(role=admin, right_id=121907, validity_to__isnull=True).exists())
+    def test_imis_admin_unscoped(self):
+        """no role grant needed: an IMIS admin holds every right, and is unscoped anyway"""
+        from core.test_helpers import create_test_interactive_user  # IMIS admin role by default
+        admin = create_test_interactive_user(username="unscadm")
+        self.assertTrue(is_location_unscoped(admin))
