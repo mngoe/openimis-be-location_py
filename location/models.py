@@ -72,7 +72,6 @@ class LocationManager(models.Manager):
                 ),
             ),
         )
-        print("parents", parents)
         return self.get_location_from_ids((parents), loc_type) if loc_type else parents
 
     def allowed(self, user_id, loc_types=['R', 'D', 'W', 'V'], strict=True, qs=False):
@@ -158,17 +157,11 @@ class LocationManager(models.Manager):
             else:
                 return Q()
         elif not user.is_imis_admin:
-            print(
-                "final ", queryset,
-                " avec autorisés ", self.allowed(user.id, loc_types)
-            )
             q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
 
             if queryset:
-                print("= ", q_allowed_location, "OK.... ", queryset.filter(q_allowed_location))
                 return queryset.filter(q_allowed_location)
             else:
-                print("Juste ", q_allowed_location)
                 return q_allowed_location
         else:
             if queryset:
@@ -193,17 +186,11 @@ class LocationManager(models.Manager):
             else:
                 return Q()
         elif not user.is_imis_admin:
-            print(
-                "final ", queryset,
-                " avec autorisés ", self.allowed(user.id, loc_types)
-            )
             q_allowed_location = Q((f"{prefix}__in", self.allowed(user.id, loc_types))) | Q((f"{prefix}__isnull", True))
 
             if queryset is not None:
-                print("= ", q_allowed_location, "OK.... ", queryset.filter(q_allowed_location))
                 return queryset.filter(q_allowed_location)
             else:
-                print("Juste ", q_allowed_location)
                 return q_allowed_location
         else:
             if queryset is not None:
