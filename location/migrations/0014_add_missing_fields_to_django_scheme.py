@@ -64,14 +64,14 @@ class Migration(migrations.Migration):
             name='user',
             field=models.ForeignKey(db_column='UserID', on_delete=django.db.models.deletion.DO_NOTHING, to='core.interactiveuser'),
         ),
-        migrations.AlterField(
-            model_name='officervillage',
-            name='validity_from',
-            field=core.fields.DateTimeField(db_column='ValidityFrom', default=datetime.datetime.now),
-        ),
-        migrations.AlterField(
-            model_name='userdistrict',
-            name='validity_from',
-            field=core.fields.DateTimeField(db_column='ValidityFrom', default=datetime.datetime.now),
-        ),
+        # migrations.AlterField(
+        #     model_name='officervillage',
+        #     name='validity_from',
+        #     field=core.fields.DateTimeField(db_column='ValidityFrom', default=datetime.datetime.now),
+        # ),
+        # migrations.AlterField(
+        #     model_name='userdistrict',
+        #     name='validity_from',
+        #     field=core.fields.DateTimeField(db_column='ValidityFrom', default=datetime.datetime.now),
+        # ),
     ]
