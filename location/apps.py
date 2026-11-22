@@ -53,7 +53,6 @@ class LocationConfig(AppConfig):
     no_location_check = None
 
     def __load_config(self, cfg):
-        #print("cfg", cfg)
         for field in cfg:
             if hasattr(LocationConfig, field):
                 setattr(LocationConfig, field, cfg[field])
